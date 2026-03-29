@@ -20,8 +20,13 @@ interface WorkflowAgent {
   config: Record<string, any>
 }
 
-export default function WorkflowBuilder() {
+interface WorkflowBuilderProps {
+  onWorkflowStarted?: (payload: { workflowId: string; executionIds: string[] }) => void
+}
+
+export default function WorkflowBuilder({ onWorkflowStarted }: WorkflowBuilderProps) {
   const [workflowName, setWorkflowName] = useState('')
+  const [taskPrompt, setTaskPrompt] = useState('')
   const [agents, setAgents] = useState<WorkflowAgent[]>([])
   const [parallel, setParallel] = useState(false)
   const [newAgentType, setNewAgentType] = useState<WorkflowAgent['type']>('research')
@@ -40,8 +45,8 @@ export default function WorkflowBuilder() {
   }
 
   const handleExecute = async () => {
-    if (!workflowName || agents.length === 0) {
-      alert('Please provide a workflow name and add at least one agent')
+    if (!workflowName || !taskPrompt.trim() || agents.length === 0) {
+      alert('Please provide a workflow name, task prompt, and at least one agent')
       return
     }
 
@@ -50,9 +55,16 @@ export default function WorkflowBuilder() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          agents: agents.map((a) => ({
+          agents: agents.map((a, index) => ({
             type: a.type,
-            input: a.config,
+            input: {
+              task: taskPrompt.trim(),
+              workflow_name: workflowName,
+              step_index: index + 1,
+              total_steps: agents.length,
+              agent_role: a.type,
+              ...a.config,
+            },
           })),
           parallel,
           workflowId: `wf-${Date.now()}`,
@@ -61,8 +73,15 @@ export default function WorkflowBuilder() {
 
       const result = await response.json()
       if (result.success) {
+        if (onWorkflowStarted) {
+          onWorkflowStarted({
+            workflowId: result.workflowId,
+            executionIds: Array.isArray(result.executionIds) ? result.executionIds : [],
+          })
+        }
         alert(`Workflow started! ID: ${result.workflowId}`)
         setWorkflowName('')
+        setTaskPrompt('')
         setAgents([])
       } else {
         alert(`Error: ${result.error}`)
@@ -97,6 +116,19 @@ export default function WorkflowBuilder() {
                 placeholder="e.g., Research & Analysis Pipeline"
                 value={workflowName}
                 onChange={(e) => setWorkflowName(e.target.value)}
+                className="border-border"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="task" className="text-sm text-foreground">
+                Task Prompt
+              </Label>
+              <Input
+                id="task"
+                placeholder="e.g., Research top 3 market trends, then produce an executive summary"
+                value={taskPrompt}
+                onChange={(e) => setTaskPrompt(e.target.value)}
                 className="border-border"
               />
             </div>
@@ -180,7 +212,7 @@ export default function WorkflowBuilder() {
             <Button
               onClick={handleExecute}
               className="w-full"
-              disabled={!workflowName || agents.length === 0}
+              disabled={!workflowName || !taskPrompt.trim() || agents.length === 0}
             >
               Execute Workflow
             </Button>

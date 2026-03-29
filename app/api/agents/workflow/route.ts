@@ -128,15 +128,17 @@ async def main():
         for cfg in agents_config
     ]
     
-    if ${String(parallel)}:
+    if ${parallel ? 'True' : 'False'}:
         results = await executor.execute_parallel(
             agents=agents,
-            workflow_id='${workflowId}'
+            workflow_id='${workflowId}',
+            execution_ids=${JSON.stringify(executionIds)}
         )
     else:
         results = await executor.execute_workflow(
             agents=agents,
-            workflow_id='${workflowId}'
+            workflow_id='${workflowId}',
+            execution_ids=${JSON.stringify(executionIds)}
         )
     
     # Output results as JSON

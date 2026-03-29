@@ -6,9 +6,9 @@ from datetime import datetime
 
 from .agent_builder import NexusAgent
 from .tools import create_default_tool_registry, ToolRegistry
-from .types import AgentType, ExecutionResult
+from .agent_types import AgentType, ExecutionResult, AgentState, ExecutionStatus
 from .database import DatabaseManager
-from langchain.tools import Tool
+from langchain_core.tools import Tool
 
 
 class AgentExecutor:
@@ -25,14 +25,16 @@ class AgentExecutor:
         agent_type: AgentType,
         input_data: Dict[str, Any],
         workflow_id: Optional[str] = None,
+        execution_id: Optional[str] = None,
         max_retries: int = 3
     ) -> ExecutionResult:
         """Execute a single agent."""
-        agent_id = str(uuid.uuid4())
+        agent_id = agent_type.value
         workflow_id = workflow_id or str(uuid.uuid4())
         
         # Create execution record
-        execution_id = self.db.create_execution(agent_id, workflow_id, input_data)
+        exec_id = self.db.create_execution(agent_id, workflow_id, input_data, execution_id=execution_id)
+        execution_id = execution_id or exec_id
         
         # Convert tools to LangChain format
         tools = self._prepare_tools()
@@ -52,21 +54,52 @@ class AgentExecutor:
                 result = await agent.execute(input_data)
                 
                 if result.status.value == 'success':
+                    if attempt > 0:
+                        self.db.log_audit_entry(
+                            execution_id,
+                            agent_id,
+                            "retry_recovered",
+                            {"attempt": attempt + 1, "status": "success_after_retry"}
+                        )
                     return result
                 
                 last_error = result.error
+                if attempt < max_retries - 1:
+                    self.db.log_audit_entry(
+                        execution_id,
+                        agent_id,
+                        "retry_attempt",
+                        {
+                            "attempt": attempt + 1,
+                            "error": last_error or "Agent returned failed status",
+                            "reason": "execution_result_failed"
+                        }
+                    )
+                    await asyncio.sleep(2 ** attempt)
             except Exception as e:
                 last_error = str(e)
                 if attempt < max_retries - 1:
                     # Exponential backoff
+                    self.db.log_audit_entry(execution_id, agent_id, "retry_attempt", {"attempt": attempt + 1, "error": str(e)})
                     await asyncio.sleep(2 ** attempt)
         
         # Return failure result after retries
+        self.db.log_audit_entry(execution_id, agent_id, "execution_failed", {"error": last_error or "Max retries exceeded"})
         return ExecutionResult(
             agent_id=agent_id,
             execution_id=execution_id,
-            status='failed',
+            status=ExecutionStatus.FAILED,
             output={},
+            state=AgentState(
+                agent_id=agent_id,
+                messages=[],
+                current_step=0,
+                context=input_data,
+                tools_used=[],
+                errors=[last_error or "Max retries exceeded"],
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            ),
             error=last_error or "Max retries exceeded",
             retry_count=max_retries
         )
@@ -74,19 +107,63 @@ class AgentExecutor:
     async def execute_workflow(
         self,
         agents: list[tuple[AgentType, Dict[str, Any]]],
-        workflow_id: Optional[str] = None
+        workflow_id: Optional[str] = None,
+        execution_ids: Optional[list[str]] = None
     ) -> list[ExecutionResult]:
         """Execute multiple agents in sequence."""
         workflow_id = workflow_id or str(uuid.uuid4())
         results = []
         
-        for agent_type, input_data in agents:
+        for i, (agent_type, input_data) in enumerate(agents):
+            exec_id = execution_ids[i] if execution_ids and len(execution_ids) > i else None
+
+            if exec_id:
+                self.db.log_audit_entry(
+                    exec_id,
+                    agent_type.value,
+                    'workflow_step_started',
+                    {
+                        'step_index': i + 1,
+                        'total_steps': len(agents),
+                        'workflow_id': workflow_id,
+                        'execution_mode': 'sequential',
+                    }
+                )
+
+            # Inject context conditionally for collaboration passing
+            if results and results[-1].status.value == 'success':
+                input_data["previous_agent_output"] = results[-1].output
+                if exec_id:
+                    self.db.log_audit_entry(
+                        exec_id,
+                        agent_type.value,
+                        'workflow_handoff_received',
+                        {
+                            'from_agent': results[-1].agent_id,
+                            'from_execution_id': results[-1].execution_id,
+                            'output_preview': str(results[-1].output)[:220],
+                        }
+                    )
+                
             result = await self.execute_agent(
                 agent_type=agent_type,
                 input_data=input_data,
-                workflow_id=workflow_id
+                workflow_id=workflow_id,
+                execution_id=exec_id
             )
             results.append(result)
+
+            if exec_id:
+                self.db.log_audit_entry(
+                    exec_id,
+                    agent_type.value,
+                    'workflow_step_completed',
+                    {
+                        'step_index': i + 1,
+                        'status': result.status.value,
+                        'duration_seconds': result.duration_seconds,
+                    }
+                )
             
             # If agent fails, stop workflow
             if result.status.value == 'failed':
@@ -97,7 +174,8 @@ class AgentExecutor:
     async def execute_parallel(
         self,
         agents: list[tuple[AgentType, Dict[str, Any]]],
-        workflow_id: Optional[str] = None
+        workflow_id: Optional[str] = None,
+        execution_ids: Optional[list[str]] = None
     ) -> list[ExecutionResult]:
         """Execute multiple agents in parallel."""
         workflow_id = workflow_id or str(uuid.uuid4())
@@ -106,9 +184,10 @@ class AgentExecutor:
             self.execute_agent(
                 agent_type=agent_type,
                 input_data=input_data,
-                workflow_id=workflow_id
+                workflow_id=workflow_id,
+                execution_id=execution_ids[i] if execution_ids and len(execution_ids) > i else None
             )
-            for agent_type, input_data in agents
+            for i, (agent_type, input_data) in enumerate(agents)
         ]
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -120,8 +199,18 @@ class AgentExecutor:
                 final_results.append(ExecutionResult(
                     agent_id='unknown',
                     execution_id='unknown',
-                    status='failed',
+                    status=ExecutionStatus.FAILED,
                     output={},
+                    state=AgentState(
+                        agent_id='unknown',
+                        messages=[],
+                        current_step=0,
+                        context={},
+                        tools_used=[],
+                        errors=[str(result)],
+                        created_at=datetime.now(),
+                        updated_at=datetime.now()
+                    ),
                     error=str(result)
                 ))
             else:
@@ -177,12 +266,13 @@ async def run_agent(
 async def run_workflow(
     agents: list[tuple[AgentType, Dict[str, Any]]],
     parallel: bool = False,
+    execution_ids: Optional[list[str]] = None,
     **kwargs
 ) -> list[ExecutionResult]:
     """Run workflow synchronously (wrapper for async)."""
     executor = AgentExecutor()
     
     if parallel:
-        return await executor.execute_parallel(agents, **kwargs)
+        return await executor.execute_parallel(agents, execution_ids=execution_ids, **kwargs)
     else:
-        return await executor.execute_workflow(agents, **kwargs)
+        return await executor.execute_workflow(agents, execution_ids=execution_ids, **kwargs)

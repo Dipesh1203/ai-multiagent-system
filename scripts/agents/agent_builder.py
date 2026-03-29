@@ -5,12 +5,12 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Callable
 from functools import wraps
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, START, END
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.tools import Tool
-from langchain.schema import AIMessage, HumanMessage, SystemMessage
+from langchain_core.tools import Tool
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from .types import AgentState, ExecutionStatus, ExecutionResult, ToolCall, AgentType
+from .agent_types import AgentState, ExecutionStatus, ExecutionResult, ToolCall, AgentType
 from .database import DatabaseManager
 
 
@@ -23,7 +23,7 @@ class NexusAgent:
         agent_type: AgentType,
         execution_id: str,
         tools: Optional[List[Tool]] = None,
-        model_name: str = "gemini-pro",
+        model_name: str = "gemini-2.5-flash",
     ):
         """Initialize agent."""
         self.agent_id = agent_id
@@ -57,7 +57,7 @@ class NexusAgent:
         graph.add_node("complete", self._complete_node)
         
         # Define edges
-        graph.add_edge("START", "process")
+        graph.add_edge(START, "process")
         graph.add_conditional_edges(
             "process",
             self._should_use_tool,
@@ -107,9 +107,31 @@ class NexusAgent:
                     llm_messages.append(HumanMessage(content=content))
             else:
                 llm_messages.append(msg)
+
+        self.db.log_audit_entry(
+            self.execution_id,
+            self.agent_id,
+            'llm_invocation_started',
+            {
+                'message_count': len(llm_messages),
+                'agent_type': self.agent_type.value,
+            }
+        )
         
         # Get response from LLM
         response = self.llm.invoke(llm_messages)
+
+        response_text = str(response.content)
+        self.db.log_audit_entry(
+            self.execution_id,
+            self.agent_id,
+            'llm_response_generated',
+            {
+                'char_count': len(response_text),
+                'response_preview': response_text[:220],
+                'tool_hint_detected': 'tool_' in response_text.lower(),
+            }
+        )
         
         # Add to messages
         new_messages = messages + [{
@@ -230,10 +252,33 @@ class NexusAgent:
                 'execution_started',
                 {'agent_type': self.agent_type.value}
             )
+
+            self.db.log_audit_entry(
+                self.execution_id,
+                self.agent_id,
+                'execution_input_received',
+                {
+                    'input_keys': list(input_data.keys()),
+                    'input_size_bytes': len(json.dumps(input_data)),
+                    'has_previous_agent_output': bool(input_data.get('previous_agent_output')),
+                }
+            )
+
+            if input_data.get('previous_agent_output'):
+                self.db.log_audit_entry(
+                    self.execution_id,
+                    self.agent_id,
+                    'collaboration_context_received',
+                    {
+                        'context_key': 'previous_agent_output',
+                        'context_preview': str(input_data.get('previous_agent_output'))[:220],
+                    }
+                )
             
             # Run graph
             compiled_graph = self.graph.compile()
             final_state = compiled_graph.invoke(state)
+            duration = (datetime.utcnow() - start_time).total_seconds()
             
             # Update execution status
             self.db.update_execution(
@@ -247,7 +292,11 @@ class NexusAgent:
                 self.execution_id,
                 self.agent_id,
                 'execution_completed',
-                {'status': 'success'}
+                {
+                    'status': 'success',
+                    'duration_seconds': duration,
+                    'message_count': len(final_state.get('messages', [])),
+                }
             )
             
             # Save final state
@@ -256,8 +305,13 @@ class NexusAgent:
                 self.agent_id,
                 final_state
             )
-            
-            duration = (datetime.utcnow() - start_time).total_seconds()
+
+            self.db.log_audit_entry(
+                self.execution_id,
+                self.agent_id,
+                'execution_state_saved',
+                {'message_count': len(final_state.get('messages', []))}
+            )
             
             return ExecutionResult(
                 agent_id=self.agent_id,
@@ -279,6 +333,7 @@ class NexusAgent:
         
         except Exception as e:
             error_msg = str(e)
+            duration = (datetime.utcnow() - start_time).total_seconds()
             
             # Update execution with error
             self.db.update_execution(
@@ -292,10 +347,11 @@ class NexusAgent:
                 self.execution_id,
                 self.agent_id,
                 'execution_error',
-                {'error': error_msg}
+                {
+                    'error': error_msg,
+                    'duration_seconds': duration,
+                }
             )
-            
-            duration = (datetime.utcnow() - start_time).total_seconds()
             
             return ExecutionResult(
                 agent_id=self.agent_id,

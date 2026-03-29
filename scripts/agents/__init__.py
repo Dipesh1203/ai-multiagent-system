@@ -1,6 +1,6 @@
 """Nexus-Agent: Autonomous Agent Framework for Enterprise Workflows."""
 
-from .types import (
+from .agent_types import (
     AgentType,
     ExecutionStatus,
     WorkflowStatus,

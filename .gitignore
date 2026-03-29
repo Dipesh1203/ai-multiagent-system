@@ -9,7 +9,14 @@ next.user-config.*
 
 # Environment variables
 .env*.local
-
+.env
+.venv
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.py[cod]
 # Common ignores
 node_modules
 .next/

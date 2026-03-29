@@ -22,42 +22,89 @@ export default function ExecutionMonitor({ executionId }: ExecutionMonitorProps)
   const [status, setStatus] = useState<'loading' | 'success' | 'failed'>('loading')
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
   const [executionData, setExecutionData] = useState<any>(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+
+  const handleDownloadReport = () => {
+    if (!executionData) return
+
+    const report = {
+      generatedAt: new Date().toISOString(),
+      execution: executionData,
+      auditLogs,
+      summary: {
+        totalAuditEvents: auditLogs.length,
+        executionId: executionData.id,
+        status: executionData.status,
+      },
+    }
+
+    const blob = new Blob([JSON.stringify(report, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `execution-report-${executionData.id}.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }
 
   useEffect(() => {
-    // Simulate loading execution details
-    setTimeout(() => {
-      setExecutionData({
-        id: executionId,
-        status: 'running',
-        agentType: 'research',
-        progress: 65,
-        startTime: new Date(Date.now() - 5000),
-        estimatedTime: 15,
-      })
+    let active = true
+    let inFlight = false
+    let hasLoadedOnce = false
 
-      setAuditLogs([
-        {
-          id: '1',
-          action: 'execution_started',
-          details: { agentType: 'research', timestamp: new Date().toISOString() },
-          createdAt: new Date(Date.now() - 5000).toISOString(),
-        },
-        {
-          id: '2',
-          action: 'tool_executed',
-          details: { toolName: 'web_search', status: 'success' },
-          createdAt: new Date(Date.now() - 3000).toISOString(),
-        },
-        {
-          id: '3',
-          action: 'processing',
-          details: { stage: 'analysis', progress: 65 },
-          createdAt: new Date().toISOString(),
-        },
-      ])
+    setStatus('loading')
+    setExecutionData(null)
+    setAuditLogs([])
 
-      setStatus('success')
-    }, 500)
+    const loadDetails = async () => {
+      if (!active || inFlight) return
+      inFlight = true
+      if (hasLoadedOnce) {
+        setIsRefreshing(true)
+      } else {
+        setStatus('loading')
+      }
+      try {
+        const res = await fetch(`/api/agents/details?executionId=${executionId}`)
+        const data = await res.json()
+        if (data.success && active) {
+          setExecutionData({
+            id: data.execution.id,
+            status: data.execution.status,
+            agentType: data.execution.agentType,
+            progress: data.execution.progress,
+            startTime: data.execution.startTime,
+            estimatedTime: 15,
+          })
+          setAuditLogs(data.audits)
+          setStatus('success')
+          hasLoadedOnce = true
+        } else if (active && !hasLoadedOnce) {
+          setStatus('failed')
+        }
+      } catch (error) {
+        if (active && !hasLoadedOnce) {
+          setStatus('failed')
+        }
+        console.error('Failed to load live execution details:', error)
+      } finally {
+        if (active) {
+          setIsRefreshing(false)
+        }
+        inFlight = false
+      }
+    }
+    
+    loadDetails()
+    const intId = setInterval(loadDetails, 10000)
+    return () => {
+      active = false
+      clearInterval(intId)
+    }
   }, [executionId])
 
   if (status === 'loading') {
@@ -117,9 +164,19 @@ export default function ExecutionMonitor({ executionId }: ExecutionMonitorProps)
                 </div>
               </div>
 
-              <Button className="w-full" variant="outline" size="sm">
+              <Button
+                className="w-full"
+                variant="outline"
+                size="sm"
+                onClick={handleDownloadReport}
+                disabled={!executionData}
+              >
                 Download Report
               </Button>
+
+              {isRefreshing && (
+                <p className="text-center text-xs text-muted-foreground">Refreshing details...</p>
+              )}
             </>
           )}
         </TabsContent>

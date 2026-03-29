@@ -17,6 +17,7 @@ interface ExecutionListProps {
   executions: Execution[]
   selectedId: string | null
   onSelect: (id: string) => void
+  isLoading?: boolean
 }
 
 const statusConfig = {

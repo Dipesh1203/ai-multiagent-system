@@ -1,11 +1,19 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
-import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import ExecutionList from './execution-list'
 import ExecutionMonitor from './execution-monitor'
 import WorkflowBuilder from './workflow-builder'
@@ -16,29 +24,100 @@ export default function AgentDashboard() {
   const [selectedExecution, setSelectedExecution] = useState<string | null>(null)
   const [executions, setExecutions] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
+  const [refreshTick, setRefreshTick] = useState(0)
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [pollIntervalMs, setPollIntervalMs] = useState(10000)
+
+  const triggerRefresh = useCallback(() => {
+    setRefreshTick((prev) => prev + 1)
+  }, [])
+
+  const handleWorkflowStarted = useCallback((payload: { workflowId: string; executionIds: string[] }) => {
+    const firstExecutionId = payload.executionIds[0]
+    if (firstExecutionId) {
+      setSelectedExecution(firstExecutionId)
+    }
+    setActiveTab('executions')
+    triggerRefresh()
+  }, [triggerRefresh])
 
   useEffect(() => {
-    // In a real app, this would fetch from the database
-    // For now, we'll use placeholder data
-    setExecutions([
-      {
-        id: 'exec-001',
-        agentType: 'research',
-        status: 'running',
-        progress: 65,
-        createdAt: new Date(),
-        result: null,
-      },
-      {
-        id: 'exec-002',
-        agentType: 'analysis',
-        status: 'success',
-        progress: 100,
-        createdAt: new Date(Date.now() - 3600000),
-        result: { summary: 'Analysis completed successfully' },
-      },
-    ])
-  }, [])
+    let active = true
+    let inFlight = false
+    let controller: AbortController | null = null
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+
+    const fetchExecutions = async () => {
+      if (!active || inFlight) return
+      inFlight = true
+      setLoading(true)
+      try {
+        controller = new AbortController()
+        timeoutId = setTimeout(() => controller?.abort(), 12000)
+
+        const response = await fetch('/api/agents/executions', {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+
+        if (timeoutId) {
+          clearTimeout(timeoutId)
+          timeoutId = null
+        }
+
+        if (!response.ok) {
+          throw new Error(`Executions API returned ${response.status}`)
+        }
+
+        const data = await response.json()
+        if (data.success && data.executions && active) {
+          // ensure dates are properly parsed since fetch returns string dates
+          const parsed = data.executions.map((e: any) => ({
+             ...e,
+             createdAt: new Date(e.createdAt)
+          }))
+          setExecutions(parsed)
+          setLastUpdatedAt(new Date())
+        }
+      } catch (error) {
+        // AbortError is expected during route changes/HMR/unmount and should stay quiet.
+        if (error instanceof Error && error.name === 'AbortError') {
+          return
+        }
+        console.error('Failed to fetch live executions:', error)
+      } finally {
+        if (timeoutId) {
+          clearTimeout(timeoutId)
+          timeoutId = null
+        }
+        if (active) {
+          setLoading(false)
+        }
+        inFlight = false
+      }
+    }
+    
+    // Fetch initial list
+    fetchExecutions()
+    
+    const intervalId = setInterval(fetchExecutions, pollIntervalMs)
+    
+    return () => {
+      active = false
+      controller?.abort()
+      if (timeoutId) {
+        clearTimeout(timeoutId)
+      }
+      clearInterval(intervalId)
+    }
+  }, [refreshTick, pollIntervalMs])
+
+  const totalExecutions = executions.length
+  const successCount = executions.filter((e) => e.status === 'success').length
+  const failedCount = executions.filter((e) => e.status === 'failed').length
+  const successRate = totalExecutions > 0 ? ((successCount / totalExecutions) * 100).toFixed(1) : '0.0'
+  const activeExecutions = executions.filter((e) => e.status === 'pending' || e.status === 'running').length
 
   return (
     <div className="min-h-screen bg-background">
@@ -52,13 +131,48 @@ export default function AgentDashboard() {
             </p>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm">
+            <Button variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
               Settings
             </Button>
-            <Button size="sm">+ New Execution</Button>
+            <Button size="sm" onClick={() => setActiveTab('workflows')}>+ New Execution</Button>
           </div>
         </div>
       </header>
+
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Dashboard Settings</DialogTitle>
+            <DialogDescription>
+              Configure how frequently the dashboard polls for live execution updates.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2">
+            <Label htmlFor="poll-interval">Polling Interval</Label>
+            <Select
+              value={String(pollIntervalMs)}
+              onValueChange={(value) => setPollIntervalMs(Number(value))}
+            >
+              <SelectTrigger id="poll-interval">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="5000">5 seconds</SelectItem>
+                <SelectItem value="10000">10 seconds</SelectItem>
+                <SelectItem value="15000">15 seconds</SelectItem>
+                <SelectItem value="30000">30 seconds</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSettingsOpen(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
@@ -71,7 +185,7 @@ export default function AgentDashboard() {
 
           {/* Overview Tab */}
           <TabsContent value="overview" className="space-y-6">
-            <AgentStats />
+            <AgentStats executions={executions} lastUpdatedAt={lastUpdatedAt} isLoading={loading} />
           </TabsContent>
 
           {/* Executions Tab */}
@@ -81,7 +195,7 @@ export default function AgentDashboard() {
                 <Card className="p-6">
                   <div className="mb-6 flex items-center justify-between">
                     <h2 className="text-xl font-semibold text-foreground">Recent Executions</h2>
-                    <Button variant="outline" size="sm">
+                    <Button variant="outline" size="sm" onClick={triggerRefresh}>
                       Refresh
                     </Button>
                   </div>
@@ -89,6 +203,7 @@ export default function AgentDashboard() {
                     executions={executions}
                     selectedId={selectedExecution}
                     onSelect={setSelectedExecution}
+                    isLoading={loading}
                   />
                 </Card>
               </div>
@@ -110,7 +225,7 @@ export default function AgentDashboard() {
 
           {/* Workflows Tab */}
           <TabsContent value="workflows" className="space-y-6">
-            <WorkflowBuilder />
+            <WorkflowBuilder onWorkflowStarted={handleWorkflowStarted} />
           </TabsContent>
 
           {/* Details Tab */}
@@ -120,19 +235,19 @@ export default function AgentDashboard() {
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="rounded-lg bg-muted p-4">
                   <p className="text-sm text-muted-foreground">Total Executions</p>
-                  <p className="text-2xl font-bold text-foreground">1,234</p>
+                  <p className="text-2xl font-bold text-foreground">{totalExecutions}</p>
                 </div>
                 <div className="rounded-lg bg-muted p-4">
                   <p className="text-sm text-muted-foreground">Success Rate</p>
-                  <p className="text-2xl font-bold text-foreground">98.5%</p>
+                  <p className="text-2xl font-bold text-foreground">{successRate}%</p>
                 </div>
                 <div className="rounded-lg bg-muted p-4">
-                  <p className="text-sm text-muted-foreground">Avg Execution Time</p>
-                  <p className="text-2xl font-bold text-foreground">2.4s</p>
+                  <p className="text-sm text-muted-foreground">Failed Executions</p>
+                  <p className="text-2xl font-bold text-foreground">{failedCount}</p>
                 </div>
                 <div className="rounded-lg bg-muted p-4">
-                  <p className="text-sm text-muted-foreground">Active Workflows</p>
-                  <p className="text-2xl font-bold text-foreground">12</p>
+                  <p className="text-sm text-muted-foreground">Active Executions</p>
+                  <p className="text-2xl font-bold text-foreground">{activeExecutions}</p>
                 </div>
               </div>
             </Card>

@@ -121,6 +121,7 @@ async def main():
         agent_type=agent_type,
         input_data=input_data,
         workflow_id='${workflowId}',
+        execution_id='${executionId}',
         max_retries=${maxRetries}
     )
     

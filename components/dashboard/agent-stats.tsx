@@ -3,80 +3,100 @@
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 
-interface StatCard {
-  label: string
-  value: string | number
-  subtext?: string
-  trend?: 'up' | 'down' | 'neutral'
+interface Execution {
+  id: string
+  agentType: string
+  status: 'pending' | 'running' | 'success' | 'failed'
+  progress: number
+  createdAt: Date
+  result?: unknown
 }
 
-export default function AgentStats() {
-  const stats: StatCard[] = [
-    {
-      label: 'Total Executions',
-      value: '1,234',
-      subtext: '+12% this week',
-      trend: 'up',
-    },
-    {
-      label: 'Success Rate',
-      value: '98.5%',
-      subtext: 'Avg across all agents',
-      trend: 'neutral',
-    },
-    {
-      label: 'Avg Duration',
-      value: '2.4s',
-      subtext: 'Per execution',
-      trend: 'down',
-    },
-    {
-      label: 'Active Workflows',
-      value: '12',
-      subtext: '3 pending completion',
-      trend: 'up',
-    },
-  ]
+interface AgentStatsProps {
+  executions: Execution[]
+  lastUpdatedAt: Date | null
+  isLoading: boolean
+}
 
-  const agentStats = [
-    { name: 'Research Agent', executions: 456, successRate: 99.2, avgTime: '2.1s' },
-    { name: 'Analysis Agent', executions: 389, successRate: 97.8, avgTime: '3.2s' },
-    { name: 'Decision Agent', executions: 234, successRate: 96.5, avgTime: '1.9s' },
-    { name: 'Execution Agent', executions: 155, successRate: 98.1, avgTime: '2.8s' },
-  ]
+export default function AgentStats({ executions, lastUpdatedAt, isLoading }: AgentStatsProps) {
+  const total = executions.length
+  const successCount = executions.filter((e) => e.status === 'success').length
+  const failedCount = executions.filter((e) => e.status === 'failed').length
+  const runningCount = executions.filter((e) => e.status === 'running' || e.status === 'pending').length
+  const successRate = total > 0 ? ((successCount / total) * 100).toFixed(1) : '0.0'
+  const averageProgress =
+    total > 0
+      ? Math.round(executions.reduce((sum, execution) => sum + (execution.progress ?? 0), 0) / total)
+      : 0
+
+  const perAgentMap = executions.reduce(
+    (acc, execution) => {
+      const key = execution.agentType || 'unknown'
+      if (!acc[key]) {
+        acc[key] = { name: key, executions: 0, successCount: 0, avgProgressTotal: 0 }
+      }
+      acc[key].executions += 1
+      if (execution.status === 'success') acc[key].successCount += 1
+      acc[key].avgProgressTotal += execution.progress ?? 0
+      return acc
+    },
+    {} as Record<string, { name: string; executions: number; successCount: number; avgProgressTotal: number }>
+  )
+
+  const agentStats = Object.values(perAgentMap)
+    .map((agent) => ({
+      name: agent.name,
+      executions: agent.executions,
+      successRate: agent.executions > 0 ? ((agent.successCount / agent.executions) * 100).toFixed(1) : '0.0',
+      avgProgress: agent.executions > 0 ? Math.round(agent.avgProgressTotal / agent.executions) : 0,
+    }))
+    .sort((a, b) => b.executions - a.executions)
+
+  const recentActivity = [...executions]
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, 6)
+
+  const formatRelativeTime = (date: Date) => {
+    const now = Date.now()
+    const deltaMs = now - new Date(date).getTime()
+    const mins = Math.floor(deltaMs / 60000)
+    if (mins < 1) return 'just now'
+    if (mins < 60) return `${mins}m ago`
+    const hours = Math.floor(mins / 60)
+    if (hours < 24) return `${hours}h ago`
+    return new Date(date).toLocaleDateString()
+  }
+
+  const lastSync = lastUpdatedAt ? `Updated ${formatRelativeTime(lastUpdatedAt)}` : 'Waiting for first sync'
 
   return (
     <div className="space-y-6">
-      {/* Top Stats */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {stats.map((stat) => (
-          <Card key={stat.label} className="p-6">
-            <div className="space-y-2">
-              <p className="text-sm text-muted-foreground">{stat.label}</p>
-              <div className="flex items-baseline justify-between">
-                <p className="text-2xl font-bold text-foreground">{stat.value}</p>
-                {stat.trend && (
-                  <Badge
-                    variant="outline"
-                    className={
-                      stat.trend === 'up'
-                        ? 'bg-green-500/10 text-green-600'
-                        : stat.trend === 'down'
-                          ? 'bg-blue-500/10 text-blue-600'
-                          : 'bg-gray-500/10 text-gray-600'
-                    }
-                  >
-                    {stat.trend === 'up' ? '↑' : stat.trend === 'down' ? '↓' : '→'}
-                  </Badge>
-                )}
-              </div>
-              {stat.subtext && <p className="text-xs text-muted-foreground">{stat.subtext}</p>}
-            </div>
-          </Card>
-        ))}
+        <Card className="p-6">
+          <p className="text-sm text-muted-foreground">Total Executions</p>
+          <p className="text-2xl font-bold text-foreground">{total}</p>
+          <p className="text-xs text-muted-foreground">Last 20 records from live poll</p>
+        </Card>
+
+        <Card className="p-6">
+          <p className="text-sm text-muted-foreground">Success Rate</p>
+          <p className="text-2xl font-bold text-foreground">{successRate}%</p>
+          <p className="text-xs text-muted-foreground">{successCount} success / {failedCount} failed</p>
+        </Card>
+
+        <Card className="p-6">
+          <p className="text-sm text-muted-foreground">In Progress</p>
+          <p className="text-2xl font-bold text-foreground">{runningCount}</p>
+          <p className="text-xs text-muted-foreground">Average progress {averageProgress}%</p>
+        </Card>
+
+        <Card className="p-6">
+          <p className="text-sm text-muted-foreground">Live Sync</p>
+          <p className="text-2xl font-bold text-foreground">{isLoading ? 'Syncing...' : 'Online'}</p>
+          <p className="text-xs text-muted-foreground">{lastSync}</p>
+        </Card>
       </div>
 
-      {/* Agent Type Performance */}
       <Card className="p-6">
         <h2 className="mb-4 text-lg font-semibold text-foreground">Agent Type Performance</h2>
         <div className="overflow-x-auto">
@@ -86,26 +106,37 @@ export default function AgentStats() {
                 <th className="px-4 py-3 text-left text-muted-foreground">Agent Type</th>
                 <th className="px-4 py-3 text-right text-muted-foreground">Executions</th>
                 <th className="px-4 py-3 text-right text-muted-foreground">Success Rate</th>
-                <th className="px-4 py-3 text-right text-muted-foreground">Avg Time</th>
+                <th className="px-4 py-3 text-right text-muted-foreground">Avg Progress</th>
               </tr>
             </thead>
             <tbody>
+              {agentStats.length === 0 && (
+                <tr>
+                  <td className="px-4 py-4 text-sm text-muted-foreground" colSpan={4}>
+                    No execution data available yet.
+                  </td>
+                </tr>
+              )}
               {agentStats.map((agent) => (
                 <tr
                   key={agent.name}
                   className="border-b border-border transition-colors hover:bg-muted/50"
                 >
-                  <td className="px-4 py-3 font-medium text-foreground">{agent.name}</td>
+                  <td className="px-4 py-3 font-medium capitalize text-foreground">{agent.name}</td>
                   <td className="px-4 py-3 text-right text-foreground">{agent.executions}</td>
                   <td className="px-4 py-3 text-right">
                     <Badge
                       variant="outline"
-                      className="bg-green-500/10 text-green-600"
+                      className={
+                        Number(agent.successRate) >= 90
+                          ? 'bg-green-500/10 text-green-600'
+                          : 'bg-yellow-500/10 text-yellow-600'
+                      }
                     >
                       {agent.successRate}%
                     </Badge>
                   </td>
-                  <td className="px-4 py-3 text-right text-foreground">{agent.avgTime}</td>
+                  <td className="px-4 py-3 text-right text-foreground">{agent.avgProgress}%</td>
                 </tr>
               ))}
             </tbody>
@@ -113,17 +144,16 @@ export default function AgentStats() {
         </div>
       </Card>
 
-      {/* Activity Timeline */}
       <Card className="p-6">
         <h2 className="mb-4 text-lg font-semibold text-foreground">Recent Activity</h2>
         <div className="space-y-3">
-          {[
-            { event: 'Research workflow completed', time: '2 min ago', status: 'success' },
-            { event: 'Analysis agent started', time: '5 min ago', status: 'running' },
-            { event: 'Decision workflow failed', time: '12 min ago', status: 'failed' },
-            { event: 'Execution agent completed', time: '18 min ago', status: 'success' },
-          ].map((item, index) => (
-            <div key={index} className="flex items-center gap-4 rounded-lg bg-muted/50 p-3">
+          {recentActivity.length === 0 && (
+            <div className="rounded-lg bg-muted/50 p-3">
+              <p className="text-sm text-muted-foreground">No activity yet. Run a workflow to populate this feed.</p>
+            </div>
+          )}
+          {recentActivity.map((item) => (
+            <div key={item.id} className="flex items-center gap-4 rounded-lg bg-muted/50 p-3">
               <div
                 className={`h-2 w-2 rounded-full ${
                   item.status === 'success'
@@ -134,8 +164,8 @@ export default function AgentStats() {
                 }`}
               />
               <div className="flex-1">
-                <p className="text-sm text-foreground">{item.event}</p>
-                <p className="text-xs text-muted-foreground">{item.time}</p>
+                <p className="text-sm text-foreground">{item.agentType || 'agent'} execution {item.status}</p>
+                <p className="text-xs text-muted-foreground">{formatRelativeTime(item.createdAt)}</p>
               </div>
             </div>
           ))}
